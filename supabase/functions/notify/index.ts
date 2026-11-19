@@ -1,19 +1,19 @@
 // LonaPics — fonction d'envoi des notifications push
 // À créer dans Supabase > Edge Functions > « notify » (voir le guide).
 // Réglage important : désactiver « Verify JWT » (la fonction vérifie elle-même qui l'appelle).
+// Aucune bibliothèque d'envoi : le chiffrement Web Push est fait avec WebCrypto (intégré à Deno).
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
-import webpush from 'npm:web-push@3.6.7';
 
-const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
-const SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-const VAPID_PUBLIC_KEY = Deno.env.get('VAPID_PUBLIC_KEY')!;
-const VAPID_PRIVATE_KEY = Deno.env.get('VAPID_PRIVATE_KEY')!;
-const VAPID_SUBJECT = Deno.env.get('VAPID_SUBJECT') ?? 'mailto:lonapics@example.com';
-const CRON_SECRET = Deno.env.get('CRON_SECRET') ?? '';
-const TIMEZONE = Deno.env.get('APP_TIMEZONE') ?? 'Europe/Paris';
+const env = (k: string) => (Deno.env.get(k) ?? '').trim();
+const SUPABASE_URL = env('SUPABASE_URL');
+const SERVICE_KEY = env('SUPABASE_SERVICE_ROLE_KEY');
+const VAPID_PUBLIC_KEY = env('VAPID_PUBLIC_KEY');
+const VAPID_PRIVATE_KEY = env('VAPID_PRIVATE_KEY');
+const VAPID_SUBJECT = env('VAPID_SUBJECT') || 'mailto:lonapics@example.com';
+const CRON_SECRET = env('CRON_SECRET');
+const TIMEZONE = env('APP_TIMEZONE') || 'Europe/Paris';
 
-webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
 const admin = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
 
 const cors = {
@@ -27,9 +27,101 @@ const json = (body: unknown, status = 200) =>
 type Pref = 'notif_photos' | 'notif_members' | 'notif_events' | 'notif_reminders';
 type Payload = { title: string; body: string; url?: string; tag?: string };
 
+/* ── Web Push (RFC 8291 + VAPID RFC 8292), sans bibliothèque externe ── */
+// @webpush-start
+const enc = new TextEncoder();
+const b64uDecode = (s: string) => {
+  const b = atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (s.length % 4)) % 4));
+  return Uint8Array.from(b, (c) => c.charCodeAt(0));
+};
+const b64uEncode = (buf: ArrayBuffer | Uint8Array) => {
+  const u = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  let s = '';
+  for (const x of u) s += String.fromCharCode(x);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+};
+const concat = (...parts: Uint8Array[]) => {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+};
+
+async function hkdf(salt: Uint8Array, ikm: Uint8Array, info: Uint8Array, length: number) {
+  const key = await crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']);
+  return new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt, info }, key, length * 8));
+}
+
+function ecJwk(publicRaw: Uint8Array, privateB64u?: string) {
+  const jwk: JsonWebKey = { kty: 'EC', crv: 'P-256', x: b64uEncode(publicRaw.slice(1, 33)), y: b64uEncode(publicRaw.slice(33, 65)), ext: true };
+  if (privateB64u) jwk.d = privateB64u;
+  return jwk;
+}
+
+// Chiffre le message pour un abonné (aes128gcm). `fixed` ne sert qu'aux tests.
+async function encryptPayload(
+  plaintext: Uint8Array, p256dh: string, authSecret: string,
+  fixed?: { salt: Uint8Array; senderPublic: Uint8Array; senderPrivate: string },
+) {
+  const uaPublic = b64uDecode(p256dh);
+  const auth = b64uDecode(authSecret);
+  let senderPrivateKey: CryptoKey;
+  let senderPublic: Uint8Array;
+  if (fixed) {
+    senderPublic = fixed.senderPublic;
+    senderPrivateKey = await crypto.subtle.importKey('jwk', ecJwk(senderPublic, fixed.senderPrivate), { name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
+  } else {
+    const pair = (await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits'])) as CryptoKeyPair;
+    senderPrivateKey = pair.privateKey;
+    senderPublic = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
+  }
+  const uaKey = await crypto.subtle.importKey('raw', uaPublic, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  const ecdhSecret = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: uaKey }, senderPrivateKey, 256));
+  const ikm = await hkdf(auth, ecdhSecret, concat(enc.encode('WebPush: info\0'), uaPublic, senderPublic), 32);
+  const salt = fixed?.salt ?? crypto.getRandomValues(new Uint8Array(16));
+  const cek = await hkdf(salt, ikm, enc.encode('Content-Encoding: aes128gcm\0'), 16);
+  const nonce = await hkdf(salt, ikm, enc.encode('Content-Encoding: nonce\0'), 12);
+  const aesKey = await crypto.subtle.importKey('raw', cek, 'AES-GCM', false, ['encrypt']);
+  const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, aesKey, concat(plaintext, new Uint8Array([2]))));
+  const header = new Uint8Array(21);
+  header.set(salt, 0);
+  new DataView(header.buffer).setUint32(16, 4096);
+  header[20] = senderPublic.length;
+  return concat(header, senderPublic, cipher);
+}
+
+async function vapidAuthorization(endpoint: string) {
+  const pub = b64uDecode(VAPID_PUBLIC_KEY);
+  if (pub.length !== 65) throw new Error('Secret VAPID_PUBLIC_KEY invalide (vérifie le copier-coller)');
+  if (b64uDecode(VAPID_PRIVATE_KEY).length !== 32) throw new Error('Secret VAPID_PRIVATE_KEY invalide (vérifie le copier-coller)');
+  const key = await crypto.subtle.importKey('jwk', ecJwk(pub, VAPID_PRIVATE_KEY), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+  const head = b64uEncode(enc.encode(JSON.stringify({ typ: 'JWT', alg: 'ES256' })));
+  const body = b64uEncode(enc.encode(JSON.stringify({ aud: new URL(endpoint).origin, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub: VAPID_SUBJECT })));
+  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, enc.encode(`${head}.${body}`));
+  return `vapid t=${head}.${body}.${b64uEncode(sig)}, k=${VAPID_PUBLIC_KEY}`;
+}
+// @webpush-end
+
+async function pushOne(sub: { endpoint: string; p256dh: string; auth: string }, payload: Payload) {
+  const body = await encryptPayload(enc.encode(JSON.stringify(payload)), sub.p256dh, sub.auth);
+  const res = await fetch(sub.endpoint, {
+    method: 'POST',
+    headers: {
+      Authorization: await vapidAuthorization(sub.endpoint),
+      'Content-Encoding': 'aes128gcm',
+      'Content-Type': 'application/octet-stream',
+      TTL: String(60 * 60 * 24),
+      Urgency: 'high',
+    },
+    body,
+  });
+  return { status: res.status, text: res.ok ? '' : await res.text().catch(() => '') };
+}
+
 /* ── Envoi ─────────────────────────────────────────────────── */
 
 async function sendTo(userIds: string[], pref: Pref | null, payload: Payload) {
+  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) throw new Error('Secrets VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY manquants');
   const unique = [...new Set(userIds)];
   if (!unique.length) return 0;
   let ids = unique;
@@ -40,23 +132,17 @@ async function sendTo(userIds: string[], pref: Pref | null, payload: Payload) {
   if (!ids.length) return 0;
   const { data: subs } = await admin.from('push_subscriptions').select('endpoint, p256dh, auth').in('user_id', ids);
   let sent = 0;
+  const errors: string[] = [];
   await Promise.all(
     (subs ?? []).map(async (s) => {
-      try {
-        await webpush.sendNotification(
-          { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
-          JSON.stringify(payload),
-          { TTL: 60 * 60 * 24, urgency: 'high' },
-        );
-        sent++;
-      } catch (e) {
-        const code = (e as { statusCode?: number }).statusCode;
-        // Abonnement expiré (appli supprimée, notifs coupées) : on le retire.
-        if (code === 404 || code === 410) await admin.from('push_subscriptions').delete().eq('endpoint', s.endpoint);
-        else console.error('push', code, (e as Error).message);
-      }
+      const r = await pushOne(s, payload);
+      if (r.status >= 200 && r.status < 300) sent++;
+      // Abonnement expiré (appli supprimée, notifs coupées) : on le retire.
+      else if (r.status === 404 || r.status === 410) await admin.from('push_subscriptions').delete().eq('endpoint', s.endpoint);
+      else errors.push(`${r.status} ${r.text}`.slice(0, 200));
     }),
   );
+  if (!sent && errors.length) throw new Error(`Refus du service de notifications : ${errors[0]}`);
   return sent;
 }
 
