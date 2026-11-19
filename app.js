@@ -1007,6 +1007,43 @@ async function disablePush() {
   toast('Notifications coupées sur ce téléphone');
 }
 
+// Test avec diagnostic détaillé, pour savoir exactement ce qui bloque.
+async function testPush() {
+  const el = openSheet(`<h2 class="h2" style="margin-bottom:12px">Test des notifications</h2><p class="muted" id="diag">Envoi en cours…</p>`);
+  const out = (html) => { const d = $('#diag', el); if (d) d.innerHTML = html; };
+  const lines = [];
+  lines.push(`Autorisation du téléphone : <b>${'Notification' in window ? Notification.permission : 'indisponible'}</b>`);
+  lines.push(`Ouvert depuis l'icône : <b>${isStandalone ? 'oui' : 'non'}</b>`);
+  let sub = null;
+  try { const reg = await swReady(); sub = reg && (await reg.pushManager.getSubscription()); } catch { /* ignoré */ }
+  lines.push(`Abonnement sur ce téléphone : <b>${sub ? 'oui' : 'non'}</b>`);
+  if (sub) {
+    try { await saveSubscription(sub); lines.push('Abonnement enregistré dans la base : <b>oui</b>'); }
+    catch (e) { lines.push(`Abonnement enregistré dans la base : <b>non</b> (${esc(errMsg(e))})`); }
+  }
+  let verdict;
+  try {
+    const { data, error } = await sb.functions.invoke('notify', { body: { type: 'test' } });
+    if (error) {
+      let detail = error.message;
+      try { const body = await error.context?.json?.(); if (body) detail = body.error || body.message || body.msg || JSON.stringify(body); } catch { /* ignoré */ }
+      const status = error.context?.status;
+      lines.push(`Fonction notify : <b>erreur${status ? ' ' + status : ''}</b> — ${esc(detail)}`);
+      verdict = status === 404 ? 'La fonction « notify » est introuvable : vérifie son nom exact dans Supabase.'
+        : status === 401 ? 'Désactive « Enforce JWT Verification » dans les réglages de la fonction notify.'
+        : 'La fonction plante : regarde ses Logs dans Supabase, ou envoie une capture de cet écran.';
+    } else {
+      lines.push(`Fonction notify : <b>OK</b>, envoyée à <b>${data?.sent ?? 0}</b> appareil(s)`);
+      verdict = data?.sent ? 'Envoyée ✅ Si rien ne s’affiche : Réglages iPhone › Notifications › LonaPics › Autoriser.'
+        : 'La fonction marche, mais aucun appareil n’est abonné. Appuie sur « Couper », puis « Activer ».';
+    }
+  } catch (e) {
+    lines.push(`Fonction notify : <b>injoignable</b> (${esc(errMsg(e))})`);
+    verdict = 'Impossible de joindre la fonction. Vérifie qu’elle est bien déployée.';
+  }
+  out(`${lines.map((l) => `<div style="margin:6px 0">${l}</div>`).join('')}<p class="tip" style="margin-top:14px">${verdict}</p>`);
+}
+
 function notifSection() {
   const p = state.profile || {};
   const status = {
@@ -1347,7 +1384,7 @@ app.addEventListener('click', async (e) => {
     case 'logout': if (confirm('Se déconnecter ?')) { await forgetThisDevice(); await sb.auth.signOut(); } break;
     case 'push-on': enablePush(); break;
     case 'push-off': disablePush(); break;
-    case 'push-test': notify({ type: 'test' }).then((r) => toast(r?.sent ? '🔔 Notification envoyée' : 'Rien reçu ? Vérifie le guide (fonction notify).')); break;
+    case 'push-test': testPush(); break;
     case 'add-event': openEventSheet(null, state.cal.selected); break;
     case 'cal-today': { const t = new Date(); state.cal = { month: new Date(t.getFullYear(), t.getMonth(), 1), selected: dayKey(t) }; render(); break; }
     case 'delete-account': openDeleteAccountSheet(); break;
