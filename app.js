@@ -650,7 +650,7 @@ function viewProfile() {
       </div>
       <div class="setting" style="flex-direction:column;align-items:flex-start">
         <b>Apparence</b>
-        <div class="chips">${[['light', 'Clair'], ['dark', 'Sombre'], ['auto', 'Auto']].map(([v, l]) => `<button class="chip ${theme === v ? 'on' : ''}" data-theme="${v}">${l}</button>`).join('')}</div>
+        <div class="chips">${[['light', 'Clair'], ['dark', 'Sombre'], ['auto', 'Auto']].map(([v, l]) => `<button class="chip ${theme === v ? 'on' : ''}" data-theme-choice="${v}">${l}</button>`).join('')}</div>
       </div>
     </div>
     ${notifSection()}
@@ -1364,8 +1364,8 @@ app.addEventListener('click', async (e) => {
   if (dd) { state.cal.selected = dd.dataset.day; const d = parseKey(dd.dataset.day); if (d.getMonth() !== state.cal.month.getMonth()) state.cal.month = new Date(d.getFullYear(), d.getMonth(), 1); render(); }
   const evb = t.closest('[data-event]');
   if (evb) { const ev = state.events.find((x) => x.id === evb.dataset.event); if (ev) openEventSheet(ev); }
-  const th = t.closest('[data-theme]');
-  if (th) { prefs.set('theme', th.dataset.theme); applyTheme(); render(); }
+  const th = t.closest('[data-theme-choice]');
+  if (th) { prefs.set('theme', th.dataset.themeChoice); applyTheme(); render(); }
 });
 
 app.addEventListener('change', (e) => {
