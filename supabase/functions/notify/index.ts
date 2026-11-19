@@ -8,8 +8,11 @@ import { createClient } from 'npm:@supabase/supabase-js@2';
 const env = (k: string) => (Deno.env.get(k) ?? '').trim();
 const SUPABASE_URL = env('SUPABASE_URL');
 const SERVICE_KEY = env('SUPABASE_SERVICE_ROLE_KEY');
-const VAPID_PUBLIC_KEY = env('VAPID_PUBLIC_KEY');
-const VAPID_PRIVATE_KEY = env('VAPID_PRIVATE_KEY');
+// Les clés sont nettoyées : un copier-coller depuis un téléphone ajoute parfois guillemets,
+// espaces spéciaux ou retours à la ligne invisibles.
+const cleanKey = (v: string) => v.replace(/^[^=]*=\s*/, (m) => (/^[A-Z_]+\s*=/.test(m) ? '' : m)).replace(/[^A-Za-z0-9\-_+/]/g, '');
+const VAPID_PUBLIC_KEY = cleanKey(env('VAPID_PUBLIC_KEY'));
+const VAPID_PRIVATE_KEY = cleanKey(env('VAPID_PRIVATE_KEY'));
 const VAPID_SUBJECT = env('VAPID_SUBJECT') || 'mailto:lonapics@example.com';
 const CRON_SECRET = env('CRON_SECRET');
 const TIMEZONE = env('APP_TIMEZONE') || 'Europe/Paris';
@@ -91,9 +94,14 @@ async function encryptPayload(
 }
 
 async function vapidAuthorization(endpoint: string) {
+  const check = (name: string, value: string, bytes: number) => {
+    let n = -1;
+    try { n = b64uDecode(value).length; } catch { /* illisible */ }
+    if (n !== bytes) throw new Error(`Secret ${name} invalide : ${value.length} caractères lus, attendu ${bytes === 65 ? 87 : 43}. Recopie-le.`);
+  };
+  check('VAPID_PUBLIC_KEY', VAPID_PUBLIC_KEY, 65);
+  check('VAPID_PRIVATE_KEY', VAPID_PRIVATE_KEY, 32);
   const pub = b64uDecode(VAPID_PUBLIC_KEY);
-  if (pub.length !== 65) throw new Error('Secret VAPID_PUBLIC_KEY invalide (vérifie le copier-coller)');
-  if (b64uDecode(VAPID_PRIVATE_KEY).length !== 32) throw new Error('Secret VAPID_PRIVATE_KEY invalide (vérifie le copier-coller)');
   const key = await crypto.subtle.importKey('jwk', ecJwk(pub, VAPID_PRIVATE_KEY), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
   const head = b64uEncode(enc.encode(JSON.stringify({ typ: 'JWT', alg: 'ES256' })));
   const body = b64uEncode(enc.encode(JSON.stringify({ aud: new URL(endpoint).origin, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub: VAPID_SUBJECT })));
@@ -103,11 +111,17 @@ async function vapidAuthorization(endpoint: string) {
 // @webpush-end
 
 async function pushOne(sub: { endpoint: string; p256dh: string; auth: string }, payload: Payload) {
-  const body = await encryptPayload(enc.encode(JSON.stringify(payload)), sub.p256dh, sub.auth);
+  const authHeader = await vapidAuthorization(sub.endpoint);
+  let body: Uint8Array;
+  try {
+    body = await encryptPayload(enc.encode(JSON.stringify(payload)), cleanKey(sub.p256dh), cleanKey(sub.auth));
+  } catch (e) {
+    return { status: 0, text: `abonnement illisible (${(e as Error).message}) : appuie sur Couper puis Activer` };
+  }
   const res = await fetch(sub.endpoint, {
     method: 'POST',
     headers: {
-      Authorization: await vapidAuthorization(sub.endpoint),
+      Authorization: authHeader,
       'Content-Encoding': 'aes128gcm',
       'Content-Type': 'application/octet-stream',
       TTL: String(60 * 60 * 24),
@@ -139,7 +153,7 @@ async function sendTo(userIds: string[], pref: Pref | null, payload: Payload) {
       if (r.status >= 200 && r.status < 300) sent++;
       // Abonnement expiré (appli supprimée, notifs coupées) : on le retire.
       else if (r.status === 404 || r.status === 410) await admin.from('push_subscriptions').delete().eq('endpoint', s.endpoint);
-      else errors.push(`${r.status} ${r.text}`.slice(0, 200));
+      else errors.push(`${r.status || ''} ${r.text}`.trim().slice(0, 200));
     }),
   );
   if (!sent && errors.length) throw new Error(`Refus du service de notifications : ${errors[0]}`);
