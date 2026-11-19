@@ -1,6 +1,6 @@
 // Service worker : interface en cache + réception des notifications push.
 // Les photos et la base Supabase ne sont jamais mises en cache ici.
-const CACHE = 'lonapics-v2';
+const CACHE = 'lonapics-v3';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'config.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/badge-96.png'];
 
 self.addEventListener('install', (e) => {
