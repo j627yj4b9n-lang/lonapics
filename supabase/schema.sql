@@ -245,3 +245,14 @@ begin
   begin alter publication supabase_realtime add table public.space_members; exception when duplicate_object then null; end;
   begin alter publication supabase_realtime add table public.events; exception when duplicate_object then null; end;
 end $$;
+
+-- ── Droits d'accès (les nouveaux projets Supabase ne les donnent plus automatiquement) ──
+-- La sécurité reste assurée par les règles (RLS) ci-dessus : ces droits ouvrent la porte,
+-- les règles décident de ce que chacun voit.
+
+grant usage on schema public to anon, authenticated, service_role;
+grant select, insert, update, delete on all tables in schema public to authenticated;
+grant all on all tables in schema public to service_role;
+grant execute on function public.is_member(uuid), public.is_space_owner(uuid), public.shares_space_with(uuid),
+  public.can_see_event(uuid, uuid), public.join_space(text), public.delete_account() to authenticated;
+grant execute on all functions in schema public to service_role;
