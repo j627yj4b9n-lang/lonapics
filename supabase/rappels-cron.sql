@@ -15,7 +15,7 @@ select cron.schedule(
   '* * * * *',
   $job$
     select net.http_post(
-      url := 'https://mgfxuvlsmmmsdxsqbqqn.supabase.co/functions/v1/notify',
+      url := 'https://mgfxuvlsmmmsdxsqbqqn.supabase.co/functions/v1/notify-',
       headers := jsonb_build_object('Content-Type', 'application/json', 'x-cron-secret', 'TON-CRON-SECRET'),
       body := '{}'::jsonb
     )

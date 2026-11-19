@@ -7,3 +7,6 @@ export const SUPABASE_ANON_KEY = 'sb_publishable_kof5n7cSGvLISo5U65QEXg_XfWFXhtI
 // Clé PUBLIQUE des notifications (déjà générée pour toi, ne la change pas).
 // Sa clé privée jumelle est dans A-GARDER-SECRET.txt : elle ne doit JAMAIS aller sur GitHub.
 export const VAPID_PUBLIC_KEY = 'BBS81RoBvbKi_KBLUV9rqApziatSDbMOnZqsC0TOUpeg7quPuE86DZADeUtLKfArMYKFY6043Eswov9a-harXjw';
+
+// Nom exact de la fonction d'envoi dans Supabase > Edge Functions.
+export const NOTIFY_FUNCTION = 'notify-';

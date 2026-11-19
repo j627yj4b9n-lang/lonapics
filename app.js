@@ -1,5 +1,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-import { SUPABASE_URL, SUPABASE_ANON_KEY, VAPID_PUBLIC_KEY } from './config.js';
+import * as CONFIG from './config.js';
+const { SUPABASE_URL, SUPABASE_ANON_KEY, VAPID_PUBLIC_KEY } = CONFIG;
+const NOTIFY_FUNCTION = CONFIG.NOTIFY_FUNCTION || 'notify';
 
 /* ───────────────────────── Configuration ───────────────────────── */
 
@@ -937,7 +939,7 @@ async function sendPhotos() {
 async function notify(body) {
   if (!sb) return null;
   try {
-    const { data } = await sb.functions.invoke('notify', { body });
+    const { data } = await sb.functions.invoke(NOTIFY_FUNCTION, { body });
     return data;
   } catch {
     return null; // les notifications ne doivent jamais bloquer l'appli
@@ -1023,13 +1025,13 @@ async function testPush() {
   }
   let verdict;
   try {
-    const { data, error } = await sb.functions.invoke('notify', { body: { type: 'test' } });
+    const { data, error } = await sb.functions.invoke(NOTIFY_FUNCTION, { body: { type: 'test' } });
     if (error) {
       let detail = error.message;
       try { const body = await error.context?.json?.(); if (body) detail = body.error || body.message || body.msg || JSON.stringify(body); } catch { /* ignoré */ }
       const status = error.context?.status;
       lines.push(`Fonction notify : <b>erreur${status ? ' ' + status : ''}</b> — ${esc(detail)}`);
-      verdict = status === 404 ? 'La fonction « notify » est introuvable : vérifie son nom exact dans Supabase.'
+      verdict = status === 404 ? `La fonction « ${NOTIFY_FUNCTION} » est introuvable : vérifie son nom exact dans Supabase.`
         : status === 401 ? 'Désactive « Enforce JWT Verification » dans les réglages de la fonction notify.'
         : 'La fonction plante : regarde ses Logs dans Supabase, ou envoie une capture de cet écran.';
     } else {
